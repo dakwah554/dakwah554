@@ -195,6 +195,596 @@ function loadCalendarNote(){const el=document.getElementById('calendarNote');if(
 function updateCountdown(){const d=(new Date(WEDDING_DATE)-new Date())/86400000;countdown.textContent=Math.max(0,Math.ceil(d))}
 function saveProfile(){const n=couple.value.trim()||'Ayu & Angga';document.querySelector('.title h1').textContent='Halo, '+n+' 👋';sideName.textContent=n;toast('Nama pasangan diperbarui di halaman ini')}
 modal.addEventListener('click',e=>{if(e.target===modal)closeModal()});
-init();
+/* ===== KALENDER INTERAKTIF ===== */
+let calendarCursor = new Date(2026, 8, 1);
+
+const calendarLocalKey = () =>
+  'weddingly_calendar_events_' + (currentUser?.id || 'guest');
+
+function getCalendarLocalEvents(){
+  try{
+    return JSON.parse(localStorage.getItem(calendarLocalKey()) || '[]');
+  }catch(e){
+    return [];
+  }
+}
+
+function setCalendarLocalEvents(data){
+  localStorage.setItem(calendarLocalKey(), JSON.stringify(data));
+}
+
+function calDateValue(date){
+  const y = date.getFullYear();
+  const m = String(date.getMonth()+1).padStart(2,'0');
+  const d = String(date.getDate()).padStart(2,'0');
+  return `${y}-${m}-${d}`;
+}
+
+function normalizeCalendarEvent(x){
+  return {
+    id: x.id || ('local_' + Date.now() + '_' + Math.random().toString(36).slice(2)),
+    date: String(x.date || x.event_date || x.start_date || '').slice(0,10),
+    title: x.title || x.name || x.event_name || 'Agenda',
+    description: x.description || x.note || '',
+    category: x.category || 'Agenda',
+    local: !x.id
+  };
+}
+
+function getAllCalendarEvents(){
+  const dbEvents = (events || [])
+    .map(normalizeCalendarEvent)
+    .filter(x => x.date);
+
+  const localEvents = getCalendarLocalEvents()
+    .map(normalizeCalendarEvent)
+    .filter(x => x.date);
+
+  return [...dbEvents, ...localEvents];
+}
+
+function showCalendarEventModal(date, existing){
+  const box = document.getElementById('modalBox');
+  const modalEl = document.getElementById('modal');
+
+  if(!box || !modalEl) return;
+
+  const ev = existing || {
+    id:'',
+    date:date || calDateValue(calendarCursor),
+    title:'',
+    description:'',
+    category:'Agenda'
+  };
+
+  box.innerHTML = `
+    <div style="font-size:22px;font-weight:800;margin-bottom:18px">
+      ${ev.id ? 'Edit Agenda' : 'Tambah Agenda'}
+    </div>
+
+    <label style="display:block;font-weight:700;margin-bottom:6px">
+      Tanggal
+    </label>
+
+    <input
+      id="calEventDate"
+      type="date"
+      value="${ev.date}"
+      style="width:100%;box-sizing:border-box;margin-bottom:14px"
+    >
+
+    <label style="display:block;font-weight:700;margin-bottom:6px">
+      Nama agenda
+    </label>
+
+    <input
+      id="calEventTitle"
+      type="text"
+      value="${esc(ev.title)}"
+      placeholder="Contoh: Meeting vendor"
+      style="width:100%;box-sizing:border-box;margin-bottom:14px"
+    >
+
+    <label style="display:block;font-weight:700;margin-bottom:6px">
+      Keterangan
+    </label>
+
+    <textarea
+      id="calEventDescription"
+      placeholder="Keterangan agenda..."
+      style="width:100%;min-height:90px;box-sizing:border-box;margin-bottom:14px"
+    >${esc(ev.description)}</textarea>
+
+    <label style="display:block;font-weight:700;margin-bottom:6px">
+      Kategori
+    </label>
+
+    <input
+      id="calEventCategory"
+      type="text"
+      value="${esc(ev.category)}"
+      placeholder="Agenda"
+      style="width:100%;box-sizing:border-box;margin-bottom:20px"
+    >
+
+    <div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap">
+
+      ${ev.id ? `
+        <button
+          class="btn"
+          style="background:#ffe8ed;color:#d52f59"
+          onclick="deleteCalendarEvent('${ev.id}')"
+        >
+          Hapus
+        </button>
+      ` : ''}
+
+      <button
+        class="btn"
+        onclick="closeModal()"
+      >
+        Batal
+      </button>
+
+      <button
+        class="btn primary"
+        onclick="saveCalendarEvent('${ev.id}')"
+      >
+        Simpan
+      </button>
+
+    </div>
+  `;
+
+  modalEl.classList.add('show');
+}
+
+async function saveCalendarEvent(id){
+  const date = document.getElementById('calEventDate')?.value;
+  const title = document.getElementById('calEventTitle')?.value.trim();
+  const description = document.getElementById('calEventDescription')?.value.trim();
+  const category = document.getElementById('calEventCategory')?.value.trim() || 'Agenda';
+
+  if(!date){
+    toast('Pilih tanggal terlebih dahulu');
+    return;
+  }
+
+  if(!title){
+    toast('Nama agenda belum diisi');
+    return;
+  }
+
+  const payload = {
+    user_id: currentUser?.id,
+    title,
+    description,
+    date,
+    category
+  };
+
+  /* Coba simpan ke Supabase */
+  if(currentUser?.id){
+    try{
+      if(id && !id.startsWith('local_')){
+        const result = await sb
+          .from('wedding_events')
+          .update(payload)
+          .eq('id', id)
+          .eq('user_id', currentUser.id);
+
+        if(!result.error){
+          await loadAll();
+          closeModal();
+          toast('Agenda berhasil diubah');
+          return;
+        }
+      }else{
+        const result = await sb
+          .from('wedding_events')
+          .insert(payload)
+          .select()
+          .single();
+
+        if(!result.error && result.data){
+          events = [...(events || []), result.data];
+          closeModal();
+          renderCalendar();
+          toast('Agenda berhasil ditambahkan');
+          return;
+        }
+      }
+    }catch(e){
+      console.log('Supabase calendar fallback:', e);
+    }
+  }
+
+  /* Jika Supabase gagal, simpan di browser */
+  let localEvents = getCalendarLocalEvents();
+
+  if(id){
+    localEvents = localEvents.map(x =>
+      x.id === id
+        ? {...x, date, title, description, category}
+        : x
+    );
+  }else{
+    localEvents.push({
+      id:'local_' + Date.now(),
+      date,
+      title,
+      description,
+      category
+    });
+  }
+
+  setCalendarLocalEvents(localEvents);
+
+  closeModal();
+  renderCalendar();
+  toast(id ? 'Agenda berhasil diubah' : 'Agenda berhasil ditambahkan');
+}
+
+async function deleteCalendarEvent(id){
+  if(!confirm('Hapus agenda ini?')) return;
+
+  if(id && !id.startsWith('local_') && currentUser?.id){
+    try{
+      const result = await sb
+        .from('wedding_events')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', currentUser.id);
+
+      if(!result.error){
+        events = (events || []).filter(x => String(x.id) !== String(id));
+        closeModal();
+        renderCalendar();
+        toast('Agenda dihapus');
+        return;
+      }
+    }catch(e){
+      console.log(e);
+    }
+  }
+
+  const localEvents = getCalendarLocalEvents()
+    .filter(x => String(x.id) !== String(id));
+
+  setCalendarLocalEvents(localEvents);
+
+  closeModal();
+  renderCalendar();
+  toast('Agenda dihapus');
+}
+
+function renderCalendar(){
+  const section = document.getElementById('calendar');
+  if(!section) return;
+
+  const layout = section.querySelector('.calendar-layout');
+  if(!layout) return;
+
+  const panels = layout.children;
+  if(panels.length < 2) return;
+
+  const calendarPanel = panels[0];
+  const agendaPanel = panels[1];
+
+  const year = calendarCursor.getFullYear();
+  const month = calendarCursor.getMonth();
+
+  const monthName = new Intl.DateTimeFormat('id-ID',{
+    month:'long',
+    year:'numeric'
+  }).format(calendarCursor);
+
+  const firstDay = new Date(year, month, 1);
+
+  /* Senin = 0, Minggu = 6 */
+  const startDay = (firstDay.getDay() + 6) % 7;
+
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  const dayNames = [
+    'Sen','Sel','Rab','Kam','Jum','Sab','Min'
+  ];
+
+  const allEvents = getAllCalendarEvents();
+
+  let html = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;gap:10px;flex-wrap:wrap">
+
+      <button
+        class="btn"
+        onclick="changeCalendarMonth(-1)"
+      >
+        ‹
+      </button>
+
+      <div style="font-size:20px;font-weight:800;text-align:center">
+        ${monthName}
+      </div>
+
+      <button
+        class="btn"
+        onclick="changeCalendarMonth(1)"
+      >
+        ›
+      </button>
+
+    </div>
+
+    <div style="
+      display:grid;
+      grid-template-columns:repeat(7,1fr);
+      gap:6px;
+      margin-bottom:6px;
+    ">
+  `;
+
+  dayNames.forEach(day => {
+    html += `
+      <div style="
+        text-align:center;
+        font-size:12px;
+        font-weight:800;
+        padding:6px 0;
+      ">
+        ${day}
+      </div>
+    `;
+  });
+
+  html += `</div>`;
+
+  html += `
+    <div style="
+      display:grid;
+      grid-template-columns:repeat(7,1fr);
+      gap:6px;
+    ">
+  `;
+
+  for(let i=0; i<startDay; i++){
+    html += `<div></div>`;
+  }
+
+  for(let day=1; day<=daysInMonth; day++){
+
+    const dateObj = new Date(year, month, day);
+    const dateStr = calDateValue(dateObj);
+
+    const dayEvents = allEvents.filter(x => x.date === dateStr);
+
+    const today = calDateValue(new Date()) === dateStr;
+
+    html += `
+      <button
+        type="button"
+        data-cal-date="${dateStr}"
+        style="
+          min-height:82px;
+          border:1px solid ${today ? '#e83f69' : '#eee'};
+          border-radius:12px;
+          background:${today ? '#fff0f4' : '#fff'};
+          padding:7px;
+          text-align:left;
+          cursor:pointer;
+          overflow:hidden;
+        "
+      >
+
+        <div style="
+          font-weight:800;
+          margin-bottom:5px;
+        ">
+          ${day}
+        </div>
+
+        ${
+          dayEvents.slice(0,2).map(ev => `
+            <div
+              data-cal-event="${ev.id}"
+              style="
+                background:#fff0f4;
+                color:#e83f69;
+                border-radius:6px;
+                padding:3px 5px;
+                font-size:10px;
+                margin-top:3px;
+                overflow:hidden;
+                white-space:nowrap;
+                text-overflow:ellipsis;
+              "
+            >
+              ${esc(ev.title)}
+            </div>
+          `).join('')
+        }
+
+        ${
+          dayEvents.length > 2
+            ? `<div style="font-size:10px;margin-top:3px">+${dayEvents.length-2} lagi</div>`
+            : ''
+        }
+
+      </button>
+    `;
+  }
+
+  html += `</div>`;
+
+  html += `
+    <div style="margin-top:14px;font-size:12px;color:#92929f">
+      Klik tanggal untuk menambah agenda.
+    </div>
+  `;
+
+  calendarPanel.innerHTML = html;
+
+  /* Klik tanggal */
+  calendarPanel.querySelectorAll('[data-cal-date]').forEach(btn => {
+    btn.addEventListener('click', function(e){
+
+      /* Kalau yang diklik adalah agenda, buka edit */
+      const eventEl = e.target.closest('[data-cal-event]');
+
+      if(eventEl){
+        const eventId = eventEl.getAttribute('data-cal-event');
+        const eventData = getAllCalendarEvents()
+          .find(x => String(x.id) === String(eventId));
+
+        if(eventData){
+          showCalendarEventModal(eventData.date, eventData);
+        }
+
+        return;
+      }
+
+      showCalendarEventModal(
+        btn.getAttribute('data-cal-date')
+      );
+    });
+  });
+
+  /* ===== AGENDA PANEL ===== */
+
+  const sortedEvents = allEvents
+    .filter(x => x.date)
+    .sort((a,b) => a.date.localeCompare(b.date));
+
+  const monthEvents = sortedEvents.filter(x => {
+    return x.date.startsWith(
+      `${year}-${String(month+1).padStart(2,'0')}`
+    );
+  });
+
+  agendaPanel.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px">
+      <div>
+        <div style="font-size:20px;font-weight:800">
+          Agenda
+        </div>
+        <div style="font-size:12px;color:#92929f">
+          Agenda bulan ${monthName}
+        </div>
+      </div>
+
+      <button
+        class="btn primary"
+        onclick="showCalendarEventModal('${calDateValue(new Date(year,month,1))}')"
+      >
+        + Agenda
+      </button>
+    </div>
+
+    ${
+      monthEvents.length
+      ? monthEvents.map(ev => `
+        <div
+          style="
+            border:1px solid #eee;
+            border-radius:12px;
+            padding:12px;
+            margin-bottom:9px;
+            cursor:pointer;
+          "
+          onclick="showCalendarEventModal('${ev.date}', getAllCalendarEvents().find(x=>String(x.id)==='${String(ev.id)}'))"
+        >
+
+          <div style="font-weight:800">
+            ${esc(ev.title)}
+          </div>
+
+          <div style="font-size:12px;color:#92929f;margin-top:4px">
+            ${formatCalendarDate(ev.date)}
+          </div>
+
+          ${
+            ev.description
+            ? `<div style="font-size:13px;margin-top:6px">${esc(ev.description)}</div>`
+            : ''
+          }
+
+        </div>
+      `).join('')
+      : `
+        <div style="
+          text-align:center;
+          padding:25px 10px;
+          color:#92929f;
+        ">
+          Belum ada agenda di bulan ini.
+        </div>
+      `
+    }
+
+    <div style="margin-top:20px">
+      <textarea
+        id="calendarNote"
+        placeholder="Tulis catatan agenda..."
+        style="width:100%;min-height:100px;box-sizing:border-box"
+      ></textarea>
+
+      <button
+        class="btn primary"
+        style="margin-top:8px"
+        onclick="saveCalendarNote()"
+      >
+        Simpan Catatan
+      </button>
+    </div>
+  `;
+
+  loadCalendarNote();
+}
+
+function formatCalendarDate(date){
+  if(!date) return '';
+
+  const parts = date.split('-');
+
+  if(parts.length !== 3) return date;
+
+  const d = new Date(
+    Number(parts[0]),
+    Number(parts[1])-1,
+    Number(parts[2])
+  );
+
+  return new Intl.DateTimeFormat('id-ID',{
+    day:'numeric',
+    month:'long',
+    year:'numeric'
+  }).format(d);
+}
+
+function changeCalendarMonth(step){
+  calendarCursor = new Date(
+    calendarCursor.getFullYear(),
+    calendarCursor.getMonth() + step,
+    1
+  );
+
+  renderCalendar();
+}
+
+/* Hubungkan kalender dengan render utama */
+if(typeof render === 'function'){
+  const oldWeddinglyRender = render;
+
+  render = function(){
+    oldWeddinglyRender();
+    renderCalendar();
+  };
+}
+
+/* Tampilkan kalender saat halaman siap */
+setTimeout(() => {
+  renderCalendar();
+}, 500);
+
+/* ===== SELESAI KALENDER INTERAKTIF ===== */ init();
 </script>
 </body></html>
